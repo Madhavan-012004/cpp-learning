@@ -1,64 +1,72 @@
 #include <opencv2/opencv.hpp>
-#include <opencv2/face.hpp>
 #include <iostream>
 #include <filesystem>
 #include <map>
+#include <vector>
 
 using namespace cv;
 using namespace std;
 namespace fs = std::filesystem;
 
-int main() {
-    string datasetPath = "M:/cpp/Dataset";  // Path to your dataset
-    string faceCascadePath = "C:/Users/madha/Downloads/haarcascade_frontalface_default.xml";  // Path to Haar Cascade
+// Function to encode faces from the dataset
+map<string, vector<Mat>> trainDataset(const string& datasetPath, CascadeClassifier& faceCascade) {
+    map<string, vector<Mat>> faceEncodings;
 
-    // Load Haar Cascade for face detection
+    for (const auto& entry : fs::directory_iterator(datasetPath)) {
+        if (fs::is_directory(entry)) {
+            string label = entry.path().filename().string(); // Get person's name
+            for (const auto& imgFile : fs::directory_iterator(entry.path())) {
+                Mat img = imread(imgFile.path().string());
+                if (img.empty()) continue;
+
+                vector<Rect> faces;
+                faceCascade.detectMultiScale(img, faces, 1.1, 3, 0, Size(30, 30));
+                if (!faces.empty()) {
+                    Mat faceROI = img(faces[0]); // Use the first detected face
+                    Mat faceEncoding;
+                    resize(faceROI, faceEncoding, Size(128, 128)); // Resize for encoding
+                    faceEncoding = faceEncoding.reshape(1, 1);     // Flatten for comparison
+                    faceEncodings[label].push_back(faceEncoding); // Store encoding
+                }
+            }
+        }
+    }
+
+    cout << "Training completed for " << faceEncodings.size() << " person(s)." << endl;
+    return faceEncodings;
+}
+
+// Function to find the best match for a detected face
+string matchFace(const Mat& detectedFace, const map<string, vector<Mat>>& faceEncodings) {
+    double minDistance = DBL_MAX;
+    string bestMatch = "Unknown Person";
+
+    for (const auto& [label, encodings] : faceEncodings) {
+        for (const auto& encoding : encodings) {
+            double distance = norm(detectedFace, encoding, NORM_L2);
+            if (distance < minDistance && distance < 80) { // Adjust threshold if needed
+                minDistance = distance;
+                bestMatch = label;
+            }
+        }
+    }
+
+    return bestMatch;
+}
+
+int main() {
+    string datasetPath = "M:/cpp/Dataset";
+    string faceCascadePath = "C:/Users/madha/Downloads/haarcascade_frontalface_default.xml";
+
+    // Load Haar Cascade
     CascadeClassifier faceCascade;
     if (!faceCascade.load(faceCascadePath)) {
         cerr << "Error loading Haar Cascade!" << endl;
         return -1;
     }
 
-    // Create the LBPH face recognizer
-    Ptr<face::LBPHFaceRecognizer> faceRecognizer = face::LBPHFaceRecognizer::create();
-
-    // Prepare training data
-    vector<Mat> images;  // Store face images
-    vector<int> labels;  // Store corresponding labels
-
-    // Iterate through the dataset
-    int label = 0;  // Start assigning labels from 0
-    for (const auto& entry : fs::directory_iterator(datasetPath)) {
-        if (fs::is_directory(entry)) {
-            string labelName = entry.path().filename().string();  // Get folder name (person's name)
-            for (const auto& imgFile : fs::directory_iterator(entry.path())) {
-                Mat img = imread(imgFile.path().string(), IMREAD_GRAYSCALE);  // Read image in grayscale
-                if (img.empty()) continue;
-
-                vector<Rect> faces;
-                faceCascade.detectMultiScale(img, faces, 1.1, 3, 0, Size(30, 30));
-
-                if (!faces.empty()) {
-                    Mat faceROI = img(faces[0]);  // Take the first detected face
-                    images.push_back(faceROI);
-                    labels.push_back(label);  // Assign label for this face
-                }
-            }
-            label++;  // Increment label for next person
-        }
-    }
-
-    // Train the face recognizer
-    if (images.empty()) {
-        cerr << "No faces found in the dataset!" << endl;
-        return -1;
-    }
-
-    faceRecognizer->train(images, labels);
-    cout << "Training completed!" << endl;
-
-    // Save the trained model (optional)
-    faceRecognizer->save("trained_model.xml");
+    // Train the dataset
+    map<string, vector<Mat>> faceEncodings = trainDataset(datasetPath, faceCascade);
 
     // Open video capture
     VideoCapture videoCapture(0);
@@ -69,33 +77,28 @@ int main() {
 
     Mat frame;
     while (videoCapture.read(frame)) {
-        Mat grayFrame;
-        cvtColor(frame, grayFrame, COLOR_BGR2GRAY);  // Convert to grayscale
-
         vector<Rect> detectedFaces;
-        faceCascade.detectMultiScale(grayFrame, detectedFaces, 1.1, 3, 0, Size(30, 30));
+        faceCascade.detectMultiScale(frame, detectedFaces, 1.1, 3, 0, Size(30, 30));
 
         for (const auto& face : detectedFaces) {
-            Mat faceROI = grayFrame(face);  // Get the face region of interest
+            Mat faceROI = frame(face);
+            Mat resizedFace;
+            resize(faceROI, resizedFace, Size(128, 128));
+            resizedFace = resizedFace.reshape(1, 1); // Flatten for comparison
 
-            // Recognize the face using the trained model
-            int predictedLabel = -1;
-            double confidence = 0.0;
-            faceRecognizer->predict(faceROI, predictedLabel, confidence);
-
-            string detectedName = "Unknown Person";
-            if (predictedLabel != -1) {
-                // Map label to person's name (based on folder name)
-                vector<string> labelsList = {"Madhavan", "John", "Alice"};  // Update with your person names
-                detectedName = labelsList[predictedLabel];
-            }
+            // Match the face
+            string detectedName = matchFace(resizedFace, faceEncodings);
 
             // Draw bounding box and label
             rectangle(frame, face, Scalar(255, 0, 0), 2);
             putText(frame, detectedName, Point(face.x, face.y - 10), FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255, 255, 255), 2);
 
             // Print to terminal
-            cout << detectedName << " detected!" << endl;
+            if (detectedName == "Unknown Person") {
+                cout << "Unknown person detected!" << endl;
+            } else {
+                cout << detectedName << " detected!" << endl;
+            }
         }
 
         imshow("Face Recognition", frame);
